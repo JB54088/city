@@ -1,0 +1,29 @@
+services:
+  citytrace:
+    build: .
+    restart: unless-stopped
+    environment:
+      APP_MODE: ${APP_MODE:-demo}
+      CITYTRACE_HOST: 0.0.0.0
+      CITYTRACE_PORT: 8000
+      CITYTRACE_DATA_DIR: /app/data
+      CITYTRACE_ADMIN_EMAIL: ${CITYTRACE_ADMIN_EMAIL:-}
+      CITYTRACE_ADMIN_PASSWORD: ${CITYTRACE_ADMIN_PASSWORD:-}
+      AMAP_JS_KEY: ${AMAP_JS_KEY:-}
+      AMAP_SECURITY_CODE: ${AMAP_SECURITY_CODE:-}
+    ports:
+      - "${CITYTRACE_BIND_ADDRESS:-127.0.0.1}:${CITYTRACE_PORT:-8000}:8000"
+    volumes:
+      - citytrace_data:/app/data
+      - ./app.py:/app/app.py:ro
+      - ./migrations:/app/migrations:ro
+      - ./static:/app/static:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  citytrace_data:

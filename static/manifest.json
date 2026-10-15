@@ -1,0 +1,11 @@
+{
+  "name": "城迹 CityTrace",
+  "short_name": "城迹",
+  "description": "记录走过的街巷，复刻真实发生的城市路线。",
+  "start_url": "/#/discover",
+  "display": "standalone",
+  "background_color": "#f6f5ef",
+  "theme_color": "#3d7659",
+  "lang": "zh-CN",
+  "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}]
+}
