@@ -1,6 +1,8 @@
-# CityTrace REST API
+# CityTrace REST API 接口参考
 
 Base path: `/api`. JSON requests use `Content-Type: application/json`. Responses follow `{ "ok": true, "data": ... }` or `{ "ok": false, "error": { "code": ..., "message": ... } }`. Authenticated sessions use an HttpOnly, SameSite=Lax cookie. Dates are UTC ISO-8601 unless noted.
+
+所有下列路径均相对于 `/api`。权限列中：`public` 表示游客可访问，`user/session` 表示已登录，`owner` 表示数据所属用户，`admin` 表示管理员。`public/owner/admin` 也受路线是否公开、是否已撤回等状态限制，不能据此获取别人的原始 GPS。页面和按钮的完整操作见 [使用手册](USER_GUIDE.md)。
 
 ## Auth and recording
 
@@ -57,12 +59,16 @@ Base path: `/api`. JSON requests use `Content-Type: application/json`. Responses
 | POST | `/routes/{id}/follow` | user | Create independent versioned follow snapshot |
 | GET | `/me/follows` | user | Follow history |
 | GET | `/follow-sessions/{id}` | owner | Read follow session and arrival records |
-| PATCH | `/follow-sessions/{id}/pause|resume|finish` | owner | Change follow state |
+| PATCH | `/follow-sessions/{id}/pause` | owner | 暂停复刻 |
+| PATCH | `/follow-sessions/{id}/resume` | owner | 继续已暂停的复刻 |
+| PATCH | `/follow-sessions/{id}/finish` | owner | 结束并保存复刻，不会自动补齐未到站记录 |
 | POST | `/follow-sessions/{id}/checkpoints` | owner | Confirm the next checkpoint in route order; paused/completed sessions return 409 |
 | POST | `/follow-sessions/{id}/points` | owner | Idempotently store the follower's own GPS samples, separately from the author's track |
 | POST | `/follow-sessions/{id}/waypoints/{waypoint_id}/arrive` | owner | Confirm arrival (alias of the legacy ordered checkpoint endpoint) |
 | GET | `/admin/routes/pending` | admin | Review queue |
-| POST | `/admin/routes/{id}/approve|reject|unpublish` | admin | Moderate route |
+| POST | `/admin/routes/{id}/approve` | admin | 审核通过并公开路线 |
+| POST | `/admin/routes/{id}/reject` | admin | 拒绝审核，可在请求中附带 `note` 原因 |
+| POST | `/admin/routes/{id}/unpublish` | admin | 下架公开路线 |
 | GET | `/admin/reports` | admin | Open reports |
 | POST | `/admin/reports/resolve` | admin | Resolve report |
 
