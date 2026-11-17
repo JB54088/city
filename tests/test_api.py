@@ -6,9 +6,11 @@ import sqlite3
 import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 import unittest
 from pathlib import Path
+from urllib.parse import urlencode
 
 import app
 
@@ -30,6 +32,7 @@ class ApiClient:
         conn.request(method, path, payload, headers)
         response = conn.getresponse()
         raw = response.read()
+        self.response_headers = dict(response.getheaders())
         set_cookie = response.getheader("Set-Cookie")
         status = response.status
         conn.close()
@@ -154,10 +157,15 @@ class CityTraceApiTests(unittest.TestCase):
         result = self.author.data("POST", f"/api/tracks/{track['id']}/points", {"samples": [point, dict(point, lat=26.081)]})
         self.assertEqual(result["inserted"], 1)
         self.author.data("POST", f"/api/tracks/{track['id']}/pause", {})
-        status, _ = self.author.request("POST", f"/api/tracks/{track['id']}/points", {"samples": [dict(point, client_id="during-pause")]})
-        self.assertEqual(status, 409)
         with app.connect() as db:
             pause_started = db.execute("SELECT paused_at_ms FROM track_pause_intervals WHERE track_id=?", (track["id"],)).fetchone()[0]
+        delayed = dict(point, client_id="delayed-before-pause", ts=pause_started-1)
+        result = self.author.data("POST", f"/api/tracks/{track['id']}/points", {"samples": [
+            delayed, dict(point, client_id="during-pause", ts=pause_started),
+        ]})
+        self.assertEqual(result, {"inserted": 1, "received": 2})
+        duplicate = self.author.data("POST", f"/api/tracks/{track['id']}/points", {"samples": [delayed]})
+        self.assertEqual(duplicate["inserted"], 0)
         time.sleep(0.02)
         self.author.data("POST", f"/api/tracks/{track['id']}/resume", {})
         with app.connect() as db:
@@ -167,13 +175,59 @@ class CityTraceApiTests(unittest.TestCase):
         self.assertEqual(result["inserted"], 0)
         self.author.data("POST", f"/api/tracks/{track['id']}/points", {"samples": [dict(point, client_id="normal-hop", lon=119.2905, ts=base+60_000)]})
         private = self.author.data("GET", f"/api/tracks/{track['id']}")
-        self.assertEqual(private["point_count"], 2)
-        self.assertEqual(len(private["points"]), 2)
+        self.assertEqual(private["point_count"], 3)
+        self.assertEqual(len(private["points"]), 3)
         self.assertLess(private["distance_m"], 100)
         forbidden, _ = self.explorer.request("GET", f"/api/tracks/{track['id']}")
         self.assertEqual(forbidden, 403)
         finished = self.author.data("POST", f"/api/tracks/{track['id']}/finish", {})
         self.assertEqual(finished["status"], "finished")
+        status, _ = self.author.request("POST", f"/api/tracks/{track['id']}/points", {"samples": [dict(point, client_id="after-finish")]})
+        self.assertEqual(status, 409)
+
+    def test_discovery_bbox_filters_before_pagination_and_counts_matches(self):
+        client = ApiClient(self.port)
+        fixture = f"bbox-fixture-{uuid.uuid4().hex}"
+        ids = sorted(uuid.uuid4().hex for _ in range(15))
+        stamp = app.now()
+        with app.connect() as db:
+            author_id = db.execute("SELECT id FROM users WHERE email='author@citytrace.demo'").fetchone()[0]
+            # Reverse insertion order and tie publication times to exercise the ID tiebreaker.
+            for index in reversed(range(len(ids))):
+                coordinate = [119.5, 26.5] if index >= 12 else [121.5, 28.5]
+                db.execute("""INSERT INTO routes(id,user_id,title,status,public_geometry,created_at,updated_at,published_at)
+                           VALUES(?,?,?,?,?,?,?,?)""",
+                           (ids[index], author_id, f"{fixture}-{index}", "published", json.dumps([coordinate]), stamp, stamp, stamp))
+
+        first = client.data("GET", "/api/routes?" + urlencode({"q": fixture, "page_size": 12}))
+        second = client.data("GET", "/api/routes?" + urlencode({"q": fixture, "page_size": 12, "page": 2}))
+        self.assertEqual(first["total"], 15)
+        self.assertEqual([route["id"] for route in first["items"]], ids[:12])
+        self.assertEqual([route["id"] for route in second["items"]], ids[12:])
+
+        query = {"q": fixture, "bbox": "119,26,120,27", "page_size": 2}
+        filtered = client.data("GET", "/api/routes?" + urlencode(query))
+        self.assertEqual(filtered["total"], 3)
+        self.assertEqual([route["id"] for route in filtered["items"]], ids[12:14])
+        filtered_second = client.data("GET", "/api/routes?" + urlencode(dict(query, page=2)))
+        self.assertEqual(filtered_second["total"], 3)
+        self.assertEqual([route["id"] for route in filtered_second["items"]], ids[14:])
+        empty_page = client.data("GET", "/api/routes?" + urlencode(dict(query, page=3)))
+        self.assertEqual(empty_page["total"], 3)
+        self.assertEqual(empty_page["items"], [])
+        repeated = client.data("GET", "/api/routes?" + urlencode(query))
+        self.assertEqual([route["id"] for route in repeated["items"]], ids[12:14])
+
+    def test_discovery_rejects_invalid_bbox(self):
+        client = ApiClient(self.port)
+        for bbox in ("", "invalid", "119,26,120", "119,26,120,27,28", "120,26,119,27",
+                     "119,27,120,26", "-181,26,120,27", "119,26,120,91", "nan,26,120,27", "119,26,inf,27"):
+            with self.subTest(bbox=bbox):
+                status, result = client.request("GET", "/api/routes?" + urlencode({"bbox": bbox}))
+                self.assertEqual(status, 422)
+                self.assertEqual(result["error"]["code"], "validation_error")
+        status, _ = client.request("GET", "/api/routes?bbox=119,26,120,27&bbox=118,25,119,26")
+        self.assertEqual(status, 422)
 
     def test_route_private_review_favorite_snapshot_and_ordered_follow(self):
         track_id, route_id = self.make_draft("巷口鱼丸测试路线")
@@ -232,6 +286,10 @@ class CityTraceApiTests(unittest.TestCase):
         ]})
         self.assertEqual(synced["inserted"], 1)
         self.assertEqual(self.explorer.data("GET", f"/api/follow-sessions/{follow['id']}")["my_track"]["point_count"], 1)
+        self.explorer.data("PATCH", f"/api/follow-sessions/{follow['id']}/pause", {})
+        status, _ = self.explorer.request("POST", f"/follow-sessions/{follow['id']}/waypoints/{checkpoint_ids[0]}/arrive", {})
+        self.assertEqual(status, 409)
+        self.explorer.data("PATCH", f"/api/follow-sessions/{follow['id']}/resume", {})
         status, _ = self.explorer.request("POST", f"/follow-sessions/{follow['id']}/waypoints/{checkpoint_ids[1]}/arrive", {})
         self.assertEqual(status, 409)
         first = self.explorer.data("POST", f"/follow-sessions/{follow['id']}/waypoints/{checkpoint_ids[0]}/arrive", {})
@@ -317,6 +375,9 @@ class CityTraceApiTests(unittest.TestCase):
         png = "data:image/png;base64," + base64.b64encode(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082")).decode()
         photo = self.author.data("POST", f"/api/routes/{route_id}/photos", {"data_url": png, "kind": "cover"}, expected=201)
         self.assertTrue(photo["url"].startswith("/api/photos/"))
+        status, _ = self.author.request("GET", photo["url"])
+        self.assertEqual(status, 200)
+        self.assertEqual(self.author.response_headers.get("Cache-Control"), "no-store")
         status, _ = self.explorer.request("GET", photo["url"])
         self.assertEqual(status, 404)
         self.author.data("POST", f"/waypoints/{checkpoint_ids[0]}/photos", {"data_url": png, "kind": "checkpoint"}, expected=200)
@@ -335,6 +396,8 @@ class CityTraceApiTests(unittest.TestCase):
         status, _ = ApiClient(self.port).request("GET", f"/api/routes/{route_id}")
         self.assertEqual(status, 404)
         status, _ = self.explorer.request("GET", f"/api/follow-sessions/{follow['id']}")
+        self.assertEqual(status, 404)
+        status, _ = ApiClient(self.port).request("GET", photo["url"])
         self.assertEqual(status, 404)
 
     def test_admin_boundary_and_invalid_segment(self):

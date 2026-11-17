@@ -577,7 +577,7 @@ class CityTraceHandler(BaseHTTPRequestHandler):
                 if method == "GET" and action is None:
                     return ok(self._track_view(track, True, db))
                 if method == "POST" and action == "points":
-                    if track["status"] != "recording": return fail(409,"当前记录未处于记录状态","conflict")
+                    if track["status"] not in ("recording", "paused"): return fail(409,"记录已经结束，无法继续上传采样","conflict")
                     samples=body.get("samples",[])
                     if not isinstance(samples,list) or len(samples)>500: return fail(422,"采样批次无效（每次最多 500 个点）","validation_error")
                     inserted=0
@@ -709,16 +709,31 @@ class CityTraceHandler(BaseHTTPRequestHandler):
                 minimum=int(params.get("min_duration",[0])[0]); maximum=int(params.get("max_duration",[10**9])[0])
                 where.append("r.elapsed_seconds BETWEEN ? AND ?"); args.extend([minimum,maximum])
             except ValueError: pass
-            bbox=params.get("bbox",[None])[0]
+            bbox_values=parse_qs(parsed.query,keep_blank_values=True).get("bbox")
+            bounds=None
+            if bbox_values is not None:
+                try:
+                    if len(bbox_values)!=1:raise ValueError
+                    west,south,east,north=map(float,bbox_values[0].split(','))
+                    if not all(math.isfinite(value) for value in (west,south,east,north)):raise ValueError
+                    if not (-180<=west<=east<=180 and -90<=south<=north<=90):raise ValueError
+                    bounds=(west,south,east,north)
+                except ValueError:
+                    return fail(422,"地图范围无效，请提供 west,south,east,north 四个有效经纬度","validation_error")
             with connect() as db:
-                rows=db.execute(f"SELECT r.*,u.nickname,(SELECT COUNT(*) FROM route_checkpoints c WHERE c.route_id=r.id) checkpoint_count,(SELECT COUNT(*) FROM route_favorites f WHERE f.route_id=r.id) favorite_count FROM routes r JOIN users u ON u.id=r.user_id WHERE {' AND '.join(where)} ORDER BY r.published_at DESC LIMIT ? OFFSET ?",(*args,size,(page-1)*size)).fetchall()
-                if bbox:
-                    try:
-                        west,south,east,north=map(float,bbox.split(','))
-                        rows=[r for r in rows if any(west<=p[0]<=east and south<=p[1]<=north for p in json.loads(r["public_geometry"] or "[]"))]
-                    except Exception: pass
+                query=f"SELECT r.*,u.nickname,(SELECT COUNT(*) FROM route_checkpoints c WHERE c.route_id=r.id) checkpoint_count,(SELECT COUNT(*) FROM route_favorites f WHERE f.route_id=r.id) favorite_count FROM routes r JOIN users u ON u.id=r.user_id WHERE {' AND '.join(where)} ORDER BY r.published_at DESC,r.id ASC"
+                offset=(page-1)*size
+                if bounds is not None:
+                    # Apply the geographic filter before deriving either pages or totals.
+                    west,south,east,north=bounds
+                    candidates=db.execute(query,args).fetchall()
+                    matching=[r for r in candidates if any(west<=p[0]<=east and south<=p[1]<=north for p in json.loads(r["public_geometry"] or "[]"))]
+                    count=len(matching)
+                    rows=matching[offset:offset+size]
+                else:
+                    rows=db.execute(query+" LIMIT ? OFFSET ?",(*args,size,offset)).fetchall()
+                    count=db.execute(f"SELECT COUNT(*) FROM routes r WHERE {' AND '.join(where)}",args).fetchone()[0]
                 result=[self._route_view(r,db,user,summary=True) for r in rows]
-                count=db.execute(f"SELECT COUNT(*) FROM routes r WHERE {' AND '.join(where)}",args).fetchone()[0]
             return ok({"items":result,"page":page,"page_size":size,"total":count})
         if path == "/api/routes" and method == "POST":
             if not user: return fail(401,"请登录后保存路线","unauthorized")
@@ -1005,7 +1020,7 @@ class CityTraceHandler(BaseHTTPRequestHandler):
                         except (KeyError,ValueError,TypeError):continue
                     return ok({"inserted":inserted,"received":len(samples)})
                 if action=="checkpoints" and method=="POST":
-                    if follow["status"] not in ("active","paused"):return fail(409,"复刻行程已经结束","conflict")
+                    if follow["status"]!="active":return fail(409,"请先继续复刻行程，再确认到站","conflict")
                     checkpoint_id=str(body.get("checkpoint_id",""))
                     snaps=json.loads(follow["checkpoints_snapshot"])
                     if not any(c["id"]==checkpoint_id for c in snaps):return fail(404,"目标不属于这条路线","not_found")
@@ -1204,7 +1219,8 @@ class CityTraceHandler(BaseHTTPRequestHandler):
         try:data=path.read_bytes()
         except OSError:return fail(404,"文件不存在","not_found")
         # Small static files only; images are served inline.
-        return 200,data,{"Content-Type":mime,"Cache-Control":"no-cache" if mime.startswith("text/") else "private, max-age=3600","X-Content-Type-Options":"nosniff"}
+        cache_control="no-store" if path.is_relative_to(UPLOAD_DIR) else "no-cache"
+        return 200,data,{"Content-Type":mime,"Cache-Control":cache_control,"X-Content-Type-Options":"nosniff"}
 
     def _respond(self,result):
         status,payload,headers=result
@@ -1279,9 +1295,10 @@ def main():
     if args.certfile:
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); context.load_cert_chain(args.certfile,args.keyfile); server.socket=context.wrap_socket(server.socket,server_side=True)
     protocol="https" if args.certfile else "http"
-    print(f"CityTrace V0.1 ready at {protocol}://{args.host}:{args.port}")
+    print(f"CityTrace V2.1 ready at {protocol}://{args.host}:{args.port}")
     print(f"Database: {DB_PATH}")
-    print("Demo accounts: author@citytrace.demo / trace123; explorer@citytrace.demo / trace123; admin@citytrace.demo / admin123")
+    if APP_MODE == "demo":
+        print("Demo accounts: author@citytrace.demo / trace123; explorer@citytrace.demo / trace123; admin@citytrace.demo / admin123")
     try:server.serve_forever()
     except KeyboardInterrupt:print("\nStopping CityTrace…")
     finally:server.server_close()
