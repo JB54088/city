@@ -13,3 +13,6 @@ uploads/
 node_modules/
 dist/
 build/
+backups/
+certs/
+.pytest_cache/

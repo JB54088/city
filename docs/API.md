@@ -14,7 +14,7 @@ Base path: `/api`. JSON requests use `Content-Type: application/json`. Responses
 | POST | `/tracks` | user | Start foreground GPS session; optional `idempotency_key` makes retries safe |
 | GET | `/tracks/active` | user | Restore active session |
 | GET | `/tracks/{id}` | owner | Read original samples |
-| POST | `/tracks/{id}/points` | owner | Idempotently batch upload `{samples:[{client_id,lat,lon,accuracy,ts}]}` |
+| POST | `/tracks/{id}/points` | owner | Idempotently batch upload `{samples:[{client_id,lat,lon,accuracy,ts}]}`; paused sessions accept delayed pre-pause samples, while pause-interval samples and uploads after finish are rejected/filtered |
 | POST | `/tracks/{id}/pause` | owner | Pause |
 | POST | `/tracks/{id}/resume` | owner | Resume |
 | POST | `/tracks/{id}/finish` | owner | Finish and compute active duration |
@@ -23,7 +23,7 @@ Base path: `/api`. JSON requests use `Content-Type: application/json`. Responses
 
 | Method | Path | Access | Purpose |
 |---|---|---|---|
-| GET | `/routes?q=&city=&category=&min_duration=&max_duration=&page=&page_size=` | public | Search approved public routes |
+| GET | `/routes?q=&city=&category=&min_duration=&max_duration=&page=&page_size=&bbox=` | public | Search approved public routes; bbox filtering precedes pagination and total counting |
 | GET | `/routes/{id}` | public/owner/admin | Route details; original points are owner-only |
 | POST | `/routes` | user | Create draft from finished owned track |
 | PATCH | `/routes/{id}` | owner | Edit draft metadata |
@@ -48,6 +48,8 @@ Base path: `/api`. JSON requests use `Content-Type: application/json`. Responses
 | GET | `/me/routes` | user | Own routes, including drafts |
 | GET | `/me/favorites` | user | Saved public routes |
 
+`bbox=west,south,east,north` filters by public GPS points within the range. Invalid, empty, repeated, non-finite, out-of-range or reversed bounds return 422. Results use stable ordering by publication time descending and route ID ascending; `page_size` is capped at 30. Photo responses use `Cache-Control: no-store` so withdrawal or logout requires a fresh authorization check.
+
 ## Replication and moderation
 
 | Method | Path | Access | Purpose |
@@ -56,7 +58,7 @@ Base path: `/api`. JSON requests use `Content-Type: application/json`. Responses
 | GET | `/me/follows` | user | Follow history |
 | GET | `/follow-sessions/{id}` | owner | Read follow session and arrival records |
 | PATCH | `/follow-sessions/{id}/pause|resume|finish` | owner | Change follow state |
-| POST | `/follow-sessions/{id}/checkpoints` | owner | Confirm the next checkpoint in route order |
+| POST | `/follow-sessions/{id}/checkpoints` | owner | Confirm the next checkpoint in route order; paused/completed sessions return 409 |
 | POST | `/follow-sessions/{id}/points` | owner | Idempotently store the follower's own GPS samples, separately from the author's track |
 | POST | `/follow-sessions/{id}/waypoints/{waypoint_id}/arrive` | owner | Confirm arrival (alias of the legacy ordered checkpoint endpoint) |
 | GET | `/admin/routes/pending` | admin | Review queue |
